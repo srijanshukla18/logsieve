@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  logsieve:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"  # HTTP ingestion
+      - "9090:9090"  # Metrics
+    volumes:
+      - ./config.example.yaml:/etc/logsieve/config.yaml:ro
+      - ./profiles:/etc/logsieve/profiles:ro
+    environment:
+      - LOGSIEVE_LOGGING_LEVEL=debug
+    depends_on:
+      - loki
+    networks:
+      - logsieve
+
+  # Example log source using Fluent Bit
+  fluent-bit:
+    image: fluent/fluent-bit:2.1
+    volumes:
+      - ./test/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/log:/var/log:ro
+    depends_on:
+      - logsieve
+    networks:
+      - logsieve
+
+  # Loki for log storage
+  loki:
+    image: grafana/loki:2.9.0
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - logsieve
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./test/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./test/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - loki
+    networks:
+      - logsieve
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./test/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - logsieve
+
+  # Test log generator
+  log-generator:
+    image: alpine:3.18
+    command: >
+      sh -c "
+        while true; do
+          echo '{\"timestamp\":\"$(date -Iseconds)\",\"level\":\"INFO\",\"message\":\"Sample log message $(date)\",\"container_name\":\"test-app\"}' |
+          wget -q -O- --post-data=@- --header='Content-Type: application/json' http://logsieve:8080/ingest?profile=auto
+          sleep 5
+        done
+      "
+    depends_on:
+      - logsieve
+    networks:
+      - logsieve
+
+networks:
+  logsieve:
+    driver: bridge
+
+volumes:
+  grafana-storage:

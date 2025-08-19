@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "name": "Go Documentation Sync",
+  "description": "Monitors all Go source files, configuration files, and other relevant project files for changes and triggers documentation updates in README.md and the docs folder when modifications are detected.",
+  "version": "1",
+  "when": {
+    "type": "userTriggered",
+    "patterns": [
+      "*.go",
+      "cmd/**/*.go",
+      "pkg/**/*.go",
+      "internal/**/*.go",
+      "*.yaml",
+      "*.yml",
+      "go.mod",
+      "go.sum",
+      "Makefile",
+      "profiles/*.yaml",
+      "docker/Dockerfile*",
+      "helm/**/*.yaml",
+      "IMPLEMENTATION_PLAN.md"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Some changes are small enough that they can be ignored and no documentation update is required. If you judge is to be that, don't update the docs.\n \nSource files in this Go project have been modified. Please review the changes and update the documentation accordingly. Focus on:\n\n1. Update README.md if there are changes to:\n   - Core functionality or architecture\n   - Configuration options\n   - Installation or usage instructions\n   - API endpoints or interfaces\n\n2. Update files in the /docs folder if there are changes to:\n   - Implementation details\n   - Development guidelines\n   - Deployment patterns\n   - Profile specifications\n\n3. Ensure documentation reflects:\n   - New features or components\n   - Configuration changes\n   - API modifications\n   - Performance improvements\n   - Breaking changes\n\nPlease analyze the modified files and provide updated documentation that maintains consistency with the current codebase.\n\nAlso update .kiro/steering/ files if required."
+  }
+}

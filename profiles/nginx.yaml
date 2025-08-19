@@ -1,0 +1,70 @@
+apiVersion: hub.logsieve.io/v1
+kind: LogProfile
+metadata:
+  name: nginx
+  version: "1.0.0"
+  author: "@logsieve"
+  description: "Nginx web server access and error logs"
+  tags: ["nginx", "web", "http"]
+  images:
+    - "nginx:*"
+    - "nginx"
+    - "bitnami/nginx:*"
+
+spec:
+  fingerprints:
+    # Standard nginx access log format
+    - pattern: '\d+\.\d+\.\d+\.\d+ - - \[.*?\] "[A-Z]+ .*?" \d+ \d+'
+      action: "template"
+      preserve: ["method", "status", "size"]
+    
+    # Health check requests - drop most
+    - pattern: '"GET /health'
+      action: "drop"
+    
+    # Static asset requests - sample heavily
+    - pattern: '"GET /[^"]*\.(css|js|ico|png|jpg|gif|svg|woff|ttf)'
+      action: "template"
+    
+    # Error logs - always keep
+    - pattern: '\[error\]'
+      action: "keep"
+    
+    # Warning logs - keep with context
+    - pattern: '\[warn\]'
+      action: "keep"
+
+  contextTriggers:
+    - pattern: '\[error\]|\[crit\]|\[alert\]|\[emerg\]'
+      before: 3
+      after: 5
+
+  sampling:
+    - pattern: '"GET /health'
+      rate: 0.01  # Keep only 1% of health checks
+    
+    - pattern: '"GET /[^"]*\.(css|js|ico)'
+      rate: 0.05  # Keep only 5% of static assets
+    
+    - pattern: '200 \d+'
+      rate: 0.1   # Keep 10% of successful requests
+
+  transforms:
+    # Scrub sensitive data
+    - field: "message"
+      regex: '(password=)[^&\s]+'
+      replace: '$1***'
+    
+    - field: "message"
+      regex: '(token=)[^&\s]+'
+      replace: '$1***'
+
+  routing:
+    rules:
+      - name: "errors"
+        pattern: '\[error\]|\[crit\]|\[alert\]|\[emerg\]'
+        output: "loki-errors"
+      
+      - name: "access_logs"
+        pattern: '\d+\.\d+\.\d+\.\d+ - -'
+        output: "loki-access"

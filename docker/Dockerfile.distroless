@@ -1,0 +1,37 @@
+# Multi-stage build for LogSieve (distroless)
+FROM golang:1.21-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application with static linking
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o dist/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o dist/logsieve ./cmd/logsieve
+
+# Final stage using distroless
+FROM gcr.io/distroless/static-debian11
+
+# Copy binaries from builder
+COPY --from=builder /app/dist/server /usr/local/bin/logsieve-server
+COPY --from=builder /app/dist/logsieve /usr/local/bin/logsieve
+
+# Copy profiles
+COPY --from=builder /app/profiles/ /etc/logsieve/profiles/
+
+# Expose ports
+EXPOSE 8080 9090
+
+# Default command
+ENTRYPOINT ["/usr/local/bin/logsieve-server"]

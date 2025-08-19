@@ -1,0 +1,97 @@
+apiVersion: hub.logsieve.io/v1
+kind: LogProfile
+metadata:
+  name: postgres
+  version: "1.0.0"
+  author: "@logsieve"
+  description: "PostgreSQL database logs including CNPG operator"
+  tags: ["postgres", "postgresql", "database", "cnpg"]
+  images:
+    - "postgres:*"
+    - "postgresql:*"
+    - "bitnami/postgresql:*"
+    - "ghcr.io/cloudnative-pg/postgresql:*"
+
+spec:
+  fingerprints:
+    # Connection logs - template and sample
+    - pattern: 'LOG:  connection received:'
+      action: "template"
+    
+    - pattern: 'LOG:  connection authorized:'
+      action: "template"
+    
+    # Checkpoint logs - drop routine ones
+    - pattern: 'LOG:  checkpoint starting: time'
+      action: "drop"
+    
+    - pattern: 'LOG:  checkpoint complete:'
+      action: "template"
+    
+    # Errors - always keep
+    - pattern: 'ERROR:  duplicate key value violates unique constraint'
+      action: "template"
+      preserve: ["constraint_name", "key_value"]
+    
+    - pattern: 'ERROR:'
+      action: "keep"
+    
+    - pattern: 'FATAL:'
+      action: "keep"
+    
+    - pattern: 'PANIC:'
+      action: "keep"
+    
+    # Vacuum and analyze logs - template
+    - pattern: 'LOG:  automatic vacuum of table'
+      action: "template"
+    
+    - pattern: 'LOG:  automatic analyze of table'
+      action: "template"
+    
+    # Slow query logs - keep with context
+    - pattern: 'LOG:  duration: [0-9]{4,}'  # Queries taking 1s+ (1000ms+)
+      action: "keep"
+
+  contextTriggers:
+    - pattern: 'ERROR:|FATAL:|PANIC:'
+      before: 5
+      after: 10
+    
+    - pattern: 'LOG:  duration: [0-9]{4,}'
+      before: 2
+      after: 3
+
+  sampling:
+    - pattern: 'LOG:  connection received:'
+      rate: 0.01  # Keep 1% of connection logs
+    
+    - pattern: 'LOG:  connection authorized:'
+      rate: 0.01  # Keep 1% of auth logs
+    
+    - pattern: 'LOG:  statement: SELECT'
+      rate: 0.05  # Keep 5% of SELECT statements
+
+  transforms:
+    # Scrub sensitive data from SQL statements
+    - field: "message"
+      regex: "(password\\s*=\\s*')[^']*'"
+      replace: "$1***'"
+    
+    - field: "message"
+      regex: '(VALUES\s*\()[^)]*(\))'
+      replace: '$1***$2'
+
+  routing:
+    rules:
+      - name: "errors"
+        pattern: 'ERROR:|FATAL:|PANIC:'
+        output: "loki-postgres-errors"
+      
+      - name: "slow_queries"
+        pattern: 'LOG:  duration: [0-9]{4,}'
+        output: "loki-postgres-slow"
+      
+      - name: "connections"
+        pattern: 'connection (received|authorized):'
+        output: "loki-postgres-connections"

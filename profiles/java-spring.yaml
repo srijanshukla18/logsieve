@@ -1,0 +1,103 @@
+apiVersion: hub.logsieve.io/v1
+kind: LogProfile
+metadata:
+  name: java-spring
+  version: "1.0.0"
+  author: "@logsieve"
+  description: "Java Spring Boot application logs"
+  tags: ["java", "spring", "spring-boot", "jvm"]
+  images:
+    - "openjdk:*"
+    - "java:*"
+    - "*spring*"
+    - "*java*"
+
+spec:
+  fingerprints:
+    # Spring Boot startup logs - template
+    - pattern: 'Started .* in .* seconds'
+      action: "template"
+    
+    - pattern: 'Tomcat started on port'
+      action: "template"
+    
+    # HTTP request logs - template and sample
+    - pattern: 'GET|POST|PUT|DELETE|PATCH'
+      action: "template"
+    
+    # Exception stack traces - keep with context
+    - pattern: 'Exception|Error|Throwable'
+      action: "keep"
+    
+    # SQL logs - template
+    - pattern: 'org\.hibernate\.SQL'
+      action: "template"
+    
+    - pattern: 'org\.springframework\.jdbc'
+      action: "template"
+    
+    # Debug logs - heavily sample
+    - pattern: 'DEBUG'
+      action: "template"
+    
+    # Info logs - moderately sample
+    - pattern: 'INFO'
+      action: "template"
+    
+    # Warn/Error logs - always keep
+    - pattern: 'WARN|ERROR|FATAL'
+      action: "keep"
+    
+    # Health checks - drop most
+    - pattern: 'GET.*/(health|actuator/health)'
+      action: "drop"
+
+  contextTriggers:
+    - pattern: 'Exception|Error|FATAL'
+      before: 10
+      after: 15
+    
+    - pattern: 'OutOfMemoryError|StackOverflowError'
+      before: 20
+      after: 5
+
+  sampling:
+    - pattern: 'DEBUG'
+      rate: 0.01  # Keep 1% of debug logs
+    
+    - pattern: 'INFO.*HTTP'
+      rate: 0.1   # Keep 10% of HTTP info logs
+    
+    - pattern: 'GET.*/(health|actuator)'
+      rate: 0.005  # Keep 0.5% of health checks
+    
+    - pattern: 'org\.hibernate\.SQL'
+      rate: 0.05  # Keep 5% of SQL logs
+
+  transforms:
+    # Scrub sensitive data
+    - field: "message"
+      regex: '(password["\s]*[:=]["\s]*)[^,}\s"]+'
+      replace: '$1***'
+    
+    - field: "message"
+      regex: '(token["\s]*[:=]["\s]*)[^,}\s"]+'
+      replace: '$1***'
+    
+    - field: "message"
+      regex: '(apikey["\s]*[:=]["\s]*)[^,}\s"]+'
+      replace: '$1***'
+
+  routing:
+    rules:
+      - name: "errors"
+        pattern: 'ERROR|FATAL|Exception'
+        output: "loki-java-errors"
+      
+      - name: "performance"
+        pattern: 'OutOfMemoryError|took [0-9]{4,}ms|GC'
+        output: "loki-java-performance"
+      
+      - name: "sql"
+        pattern: 'org\.hibernate|org\.springframework\.jdbc'
+        output: "loki-java-sql"

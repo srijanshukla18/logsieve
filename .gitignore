@@ -1,0 +1,100 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+logsieve
+server
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files (local overrides)
+config.local.yaml
+*.local.yaml
+
+# Logs
+*.log
+
+# Build artifacts
+dist/
+build/
+
+# Helm packages
+*.tgz
+
+# Profile cache
+profiles/cache/
+
+# Test outputs
+test/outputs/
+coverage.out
+coverage.html
+
+# Temporary files
+*.tmp
+*.temp
+
+# Docker volumes and data
+docker-data/
+loki-data/
+grafana-data/
+
+# Development artifacts
+.env
+.env.local
+.env.*.local
+
+# Kubernetes secrets (if any)
+secrets/
+*.secret.yaml
+
+# Profile development
+profiles/local/
+profiles/dev/
+
+# Metrics and monitoring data
+metrics/
+monitoring/data/
+
+# Certificate files
+*.pem
+*.key
+*.crt
+*.p12
+
+# Backup files
+*.bak
+*.backup
+
+# Editor temp files
+*~
+.#*
+\#*#
+
+# Air live reload (if used)
+.air.toml
+tmp/
+
+# Delve debugger
+__debug_bin

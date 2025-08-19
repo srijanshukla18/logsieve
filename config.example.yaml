@@ -1,0 +1,68 @@
+# LogSieve Configuration Example
+
+server:
+  port: 8080
+  address: "0.0.0.0"
+  readTimeout: 30s
+  writeTimeout: 30s
+  idleTimeout: 60s
+
+ingestion:
+  maxBatchSize: 1000
+  flushInterval: 5s
+  maxMemoryMB: 100
+  bufferSize: 10000
+  maxRequestSize: 10485760  # 10MB
+
+dedup:
+  engine: "drain3"
+  cacheSize: 10000
+  contextLines: 5
+  similarityThreshold: 0.9
+  patternTTL: 1h
+  fingerprintTTL: 30m
+
+profiles:
+  autoDetect: true
+  hubURL: "https://hub.logsieve.io"
+  syncInterval: 1h
+  localPath: "/etc/logsieve/profiles"
+  cachePath: "/var/cache/logsieve/profiles"
+  defaultProfile: "generic"
+
+outputs:
+  - name: "loki"
+    type: "loki"
+    url: "http://loki:3100"
+    batchSize: 100
+    timeout: 10s
+    retries: 3
+    headers:
+      "Content-Type": "application/json"
+  
+  - name: "elasticsearch"
+    type: "elasticsearch"
+    url: "http://elasticsearch:9200"
+    batchSize: 50
+    timeout: 15s
+    retries: 3
+    config:
+      index: "logs"
+      template: "logs-template"
+
+  - name: "stdout"
+    type: "stdout"
+    batchSize: 100
+    timeout: 10s
+    retries: 1
+
+metrics:
+  enabled: true
+  port: 9090
+  path: "/metrics"
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+  structured: true
