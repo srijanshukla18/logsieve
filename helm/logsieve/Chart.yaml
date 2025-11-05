@@ -1,0 +1,19 @@
+apiVersion: v2
+name: logsieve
+description: A Helm chart for LogSieve - High-performance log deduplication and filtering
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - logging
+  - observability
+  - deduplication
+  - drain3
+  - loki
+  - elasticsearch
+home: https://github.com/logsieve/logsieve
+sources:
+  - https://github.com/logsieve/logsieve
+maintainers:
+  - name: LogSieve Team
+    url: https://github.com/logsieve/logsieve

@@ -1,0 +1,170 @@
+replicaCount: 2
+
+image:
+  repository: logsieve/sieve
+  pullPolicy: IfNotPresent
+  tag: "" # Overrides the image tag whose default is the chart appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: logsieve.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - logsieve
+          topologyKey: kubernetes.io/hostname
+
+# LogSieve Configuration
+config:
+  server:
+    port: 8080
+    address: "0.0.0.0"
+    readTimeout: 30s
+    writeTimeout: 30s
+    idleTimeout: 60s
+
+  ingestion:
+    maxBatchSize: 1000
+    flushInterval: 5s
+    maxMemoryMB: 200
+    bufferSize: 10000
+    maxRequestSize: 10485760  # 10MB
+
+  dedup:
+    engine: "drain3"
+    cacheSize: 10000
+    contextLines: 5
+    similarityThreshold: 0.4
+    patternTTL: 1h
+    fingerprintTTL: 30m
+
+  profiles:
+    autoDetect: true
+    localPath: "/etc/logsieve/profiles"
+    defaultProfile: "generic"
+
+  outputs:
+    - name: "loki"
+      type: "loki"
+      url: "http://loki:3100"
+      batchSize: 100
+      timeout: 10s
+      retries: 3
+
+  metrics:
+    enabled: true
+    port: 9090
+    path: "/metrics"
+
+  logging:
+    level: "info"
+    format: "json"
+    structured: true
+
+# Authentication (optional)
+auth:
+  enabled: false
+  apiKeys: []
+    # - "your-api-key-here"
+
+# Rate limiting (optional)
+rateLimit:
+  enabled: false
+  requestsPerMinute: 1000
+  burstSize: 100
+  keyFunc: "ip"  # "ip", "header", "api_key"
+
+# Profiles ConfigMap
+profiles:
+  enabled: true
+  # Mount custom profiles from ConfigMap
+  configMap:
+    create: true
+    name: ""
+    # Custom profiles can be added here
+    data: {}
+
+# Service Monitor for Prometheus Operator
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Volume mounts
+volumeMounts: []
+volumes: []
+
+# Environment variables
+env: []
+envFrom: []
