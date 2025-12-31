@@ -1,238 +1,268 @@
 # LogSieve
 
-**Plug into the log-reduction graph: slash container log volumes by 90% with community-powered profiles.**
+A high-performance log deduplication sidecar that reduces container log volumes by ~90% using the Drain3 algorithm and community-powered profiles.
 
-*A sidecar that dedupes, filters, and routes logs before they hit Loki, Elasticsearch, or ClickHouse – powered by shared profiles for your exact stack.*
+## Why
 
----
-
-## 1. Why LogSieve?
-
-Modern apps vomit **terabytes** of near-identical logs: duplicate stack traces, healthcheck spam, and heartbeat noise. Storage costs explode while signal drowns.
-
-Existing solutions fail you:
-
-* ❌ Hand-crafted regexes that break on new releases
-* ❌ Siloed tools (Loki filters, Drain3, Fluent Bit) that solve only half the problem
-* ❌ No shared knowledge for common stacks
-
-LogSieve fixes this with **community-config**:
-
-1. Someone creates a profile for `postgres-cnpg` → shares it publicly
-2. **You drop the sidecar into your cluster**
-3. Log volume drops 90% – *zero new config required*
+**Your logging bill is 90% noise.** Health checks, heartbeats, duplicate stack traces - they drown the signal while exploding storage costs. LogSieve sits between your log collector and storage backend, intelligently deduplicating logs using shared profiles so you don't have to write (and maintain) regex filters for every application in your stack.
 
 ---
 
-## 2. How It Works (Fluent Bit First!)
+## How It Works
 
-```mermaid
-flowchart LR
-  A[Your App] --> B(Fluent Bit)
-  B -->|HTTP| C[LogSieve]
-  C -->|Deduped| D[Loki/ES/ClickHouse]
-  C -->|Raw Samples| E[Profile Hub]
-  E -->|Community Profiles| C
+```
+┌──────────┐     ┌────────────┐     ┌──────────┐     ┌─────────────────┐
+│ Your App │────>│ Fluent Bit │────>│ LogSieve │────>│ Loki/ES/S3/etc  │
+└──────────┘     └────────────┘     └──────────┘     └─────────────────┘
+                                          │
+                                    ┌─────┴─────┐
+                                    │ Profiles  │
+                                    │ (builtin  │
+                                    │ + custom) │
+                                    └───────────┘
 ```
 
-### For Your PostgreSQL CNPG Stack
-
-1. Fluent Bit tails container logs
-2. Sends batches to LogSieve via HTTP
-3. LogSieve loads `postgres-cnpg.yaml` from profile hub
-4. Drain3 fingerprints/templates identical lines
-5. Only unique events + critical context shipped
-
-*No YAML editing. No regex hell.*
+1. **Fluent Bit** (or any log collector) sends logs to LogSieve's HTTP endpoint
+2. **LogSieve** applies profile-based rules and Drain3 templating to deduplicate
+3. **Only unique/important logs** get forwarded to your storage backend
 
 ---
 
-## 3. Key Features
+## Features
 
-### 🚀 Community Profile Hub
+### Deduplication Engine
+- **Drain3 Algorithm**: Production-grade implementation with prefix tree clustering, template generalization, and configurable similarity thresholds
+- **Fingerprint Cache**: SHA256-based exact duplicate detection with TTL
+- **Context Windows**: Preserve N lines around errors/critical events
 
-* **Find profiles:** `hub.logsieve.io/profiles?image=postgres-cnpg:v1.2`
-* **Share profiles:** Submit your YAML via PR → all users benefit
-* **Auto-update:** Profiles versioned by image SHA
+### Profile System
+- **Auto-detection**: Matches containers to profiles by image name or log patterns
+- **Builtin Profiles**: nginx, postgres, java-spring included out of the box
+- **YAML Configuration**: Define fingerprint rules, sampling rates, transforms, and routing
+- **Signature Verification**: Ed25519 signing support for profile integrity (strict/relaxed modes)
 
-### ⚡ Fluent Bit Native
+### Output Adapters
+- **Loki**: Full v3+ support with structured metadata and cardinality-aware label handling
+- **Elasticsearch**: ECS-compliant document structure
+- **S3**: Batched uploads for archival
+- **stdout**: Development and debugging
 
-```conf
-[OUTPUT]
-  Name          http
-  Host          logsieve
-  Port          8080
-  URI           /ingest?profile=auto
-  Format        json
-```
-
-*(Works with Vector/Loki too)*
-
-### 🧠 Smart Reduction Engines
-
-* **Official Drain3 implementation:** Full spec compliance with proper clustering, template generalization, and parameter extraction
-* **Context windows:** Keep ±N lines around first error occurrence
-* **Advanced output support:** Loki v3+ structured metadata, ECS-compliant Elasticsearch, Prometheus best practices
-* **Cost metering:** `logsieve_dropped_bytes_total` shows savings
-
-### 🔌 Output Flexibility
-
-Loki, Elasticsearch, ClickHouse, S3, or stdout.
+### Observability
+- **Prometheus Metrics**: `logsieve_dedup_ratio`, `logsieve_ingestion_logs_total`, `logsieve_output_errors_total`, etc.
+- **Circuit Breakers**: Automatic backoff and retry with exponential delays
+- **Health Endpoints**: `/health`, `/ready`, `/stats`
 
 ---
 
-## 4. Get Started in 5 Minutes
-
-### Kubernetes (Fluent Bit + Helm)
-
-```bash
-helm repo add logsieve https://logsieve.github.io/charts
-helm install my-sieve logsieve/logsieve \
-  --set fluentbit.enabled=true \
-  --set profileHub.autoImport=true
-```
-
-*Auto-injects sidecar + loads profiles for nginx, postgres, java-spring, etc.*
+## Quick Start
 
 ### Docker Compose
 
 ```yaml
 services:
-  app:
-    image: yourcorp/postgres-cnpg:v1.2
-  fluentbit:
-    image: cr.fluentbit.io/fluent/fluent-bit
-    config: |
-      [INPUT]
-        Name tail
-        Path /var/log/containers/*.log
-      
-      [OUTPUT]
-        Name http
-        Match *
-        Host logsieve
-        Port 8080
-        URI /ingest?profile=postgres-cnpg
-
   logsieve:
     image: logsieve/sieve:latest
-    command: --hub-sync hourly
+    ports:
+      - "8080:8080"   # HTTP ingestion
+      - "9090:9090"   # Metrics
+    environment:
+      - LOGSIEVE_PROFILES_AUTODETECT=true
+    volumes:
+      - ./config.yaml:/etc/logsieve/config.yaml
+
+  fluent-bit:
+    image: fluent/fluent-bit:2.1
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf
+    depends_on:
+      - logsieve
+```
+
+### Fluent Bit Configuration
+
+```ini
+[OUTPUT]
+    Name          http
+    Match         *
+    Host          logsieve
+    Port          8080
+    URI           /ingest?profile=auto
+    Format        json
+    Header        X-Source fluent-bit
+```
+
+### Send Test Logs
+
+```bash
+curl -X POST http://localhost:8080/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "logs": [
+      {"log": "User 123 logged in from 192.168.1.1", "time": "2024-01-01T00:00:00Z"},
+      {"log": "User 456 logged in from 10.0.0.1", "time": "2024-01-01T00:00:01Z"}
+    ]
+  }'
 ```
 
 ---
 
-## 5. How Profiles Work (For Contributors)
+## Configuration
 
-### Find/Use Existing Profiles
+```yaml
+server:
+  port: 8080
+  address: "0.0.0.0"
 
-```bash
-# List all PostgreSQL profiles
-curl hub.logsieve.io/v1/profiles?app=postgres
+ingestion:
+  maxBatchSize: 1000
+  flushInterval: 5s
+  maxMemoryMB: 100
+  queueType: memory  # or "disk" for persistence
 
-# Run with profile
-docker run logsieve/sieve --profile=hub/bitnami-postgres-15
+dedup:
+  engine: "drain3"
+  cacheSize: 10000
+  contextLines: 5
+  similarityThreshold: 0.4
+
+profiles:
+  autoDetect: true
+  localPath: "/etc/logsieve/profiles"
+  trustMode: relaxed  # strict|relaxed|offline
+
+outputs:
+  - name: "loki"
+    type: "loki"
+    url: "http://loki:3100"
+    batchSize: 100
+    retries: 3
+
+metrics:
+  enabled: true
+  port: 9090
 ```
 
-### Create/Share New Profiles
+---
 
-1. Record logs:
+## Profiles
 
-```bash
-logsieve capture --app=your-app > sample.log
-```
-
-2. Generate profile:
-
-```bash
-logsieve learn -i sample.log -o your-app.yaml
-```
-
-3. Submit to hub:
+Profiles define how logs from specific applications should be processed. Example for nginx:
 
 ```yaml
 apiVersion: hub.logsieve.io/v1
 kind: LogProfile
 metadata:
-  name: bitnami-postgres-15
-  image: docker.io/bitnami/postgresql:15.*
-  author: @yourgithub
+  name: nginx
+  version: "1.0.0"
+  images:
+    - "nginx:*"
+
 spec:
   fingerprints:
-    - pattern: "ERROR:  duplicate key .*"
-      scrub: ["Key (.*)=exists"] 
-  # ... (full spec same as before)
+    - pattern: '"GET /health'
+      action: "drop"
+    - pattern: '\[error\]'
+      action: "keep"
+    - pattern: '\d+\.\d+\.\d+\.\d+ - - \[.*?\]'
+      action: "template"
+
+  sampling:
+    - pattern: '"GET /health'
+      rate: 0.01  # Keep 1%
+
+  transforms:
+    - field: "message"
+      regex: '(password=)[^&\s]+'
+      replace: '$1***'
 ```
 
-*All profiles require 30MB test samples for CI validation.*
+### Profile Actions
+- **drop**: Discard the log entirely
+- **keep**: Always forward (bypass deduplication)
+- **template**: Apply Drain3 clustering
 
 ---
 
-## 6. Built-In Observability
+## Architecture
 
-### Critical Metrics
+```
+cmd/
+  logsieve/       # CLI tool (capture, learn, audit, config)
+  server/         # HTTP server entry point
 
-| Metric                          | Description               | Alert Threshold              |
-| ------------------------------- | ------------------------- | ---------------------------- |
-| `logsieve_dedup_ratio`          | % of lines deduped        | < 0.85                       |
-| `logsieve_ingestion_logs_total` | Total logs processed      | Rate monitoring              |
-| `logsieve_output_errors_total`  | Output delivery failures  | > 10/min                     |
-| `logsieve_bytes_dropped_total`  | Storage \$ saved          | *Grafana dashboard included* |
-| `logsieve_drain3_clusters_total`| Active log templates      | Growth monitoring            |
+pkg/
+  config/         # YAML configuration loading
+  dedup/          # Drain3 + fingerprint + context window
+  ingestion/      # HTTP handler, parser, memory/disk buffer
+  metrics/        # Prometheus registry
+  output/         # Loki, Elasticsearch, S3, stdout adapters
+  processor/      # Orchestrates dedup -> profiles -> routing
+  profiles/       # Profile parsing, detection, verification
 
-### Profile Health Checks
+profiles/         # Builtin YAML profiles (nginx, postgres, java-spring)
+docker/           # Dockerfile and Dockerfile.distroless
+```
+
+---
+
+## CLI Commands
 
 ```bash
-# Scan profile against live logs
-logsieve audit --profile=hub/your-app --live
+# Start the server
+logsieve server --config config.yaml
+
+# Generate example config
+logsieve config example -o config.yaml
+
+# Validate config
+logsieve config validate -c config.yaml
+
+# Show version
+logsieve version
 ```
 
-> ✅ Profile hub/your-app: 98.2% coverage
-> ⚠️ 12 new patterns detected (saved to /tmp/unknown.log)
+---
+
+## Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `logsieve_dedup_ratio` | Deduplication ratio (0-1) per profile |
+| `logsieve_ingestion_logs_total` | Total logs ingested by source/profile |
+| `logsieve_output_logs_total` | Logs forwarded to outputs |
+| `logsieve_output_errors_total` | Output delivery failures |
+| `logsieve_dedup_patterns_total` | Active Drain3 clusters |
 
 ---
 
-## 7. Roadmap
-
-* **Q3 2024:** Profile Hub Web UI (search, preview, diff)
-* **Q4 2024:** SaaS LLM summaries for unknown patterns (\$0.15/GB)
-* **2025:** Integrated Fluent Bit build (single binary)
-
-*Windows containers and ClickHouse output are community-driven efforts.*
-
----
-
-## 8. Why This Works
-
-### The Flywheel Effect
-
-```mermaid
-flowchart TD
-  A[User creates profile] --> B[Posted to hub]
-  B --> C[1000s deploy it]
-  C --> D[User finds bugs/updates]
-  D --> A
-```
-
-**You benefit immediately:**
-
-1. CNPG user shares `postgres-cnpg.yaml`
-2. Your installation auto-downloads it
-3. Your Loki bill drops 89% next month
-
----
-
-## 9. Start Saving
+## Building from Source
 
 ```bash
-# Try it with your PostgreSQL logs
-docker run --rm logsieve/sieve \
-  --source fluentbit \
-  --profile hub/bitnami-postgres-15 \
-  --output loki://your-loki:3100
+# Prerequisites: Go 1.21+
+git clone https://github.com/logsieve/logsieve.git
+cd logsieve
+
+# Build
+make build
+
+# Run tests
+make test
+
+# Build Docker image
+make docker-build
 ```
 
-**Join the log-reduction graph:**
-➡️ [hub.logsieve.io](https://hub.logsieve.io) | [📚 Docs](https://logsieve.io/docs) | [💬 Slack](https://slack.logsieve.io)
+---
 
-*“Finally stopped paying for logging junk”* – Early user, 34TB/month reduction
+## Performance Targets
 
+- **Throughput**: 10,000 logs/second per instance
+- **Latency**: <10ms p99
+- **Memory**: <100MB baseline, <500MB under load
+- **Dedup Ratio**: >85% for typical workloads
+
+---
+
+## License
+
+[License details to be added]

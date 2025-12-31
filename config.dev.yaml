@@ -1,0 +1,64 @@
+# LogSieve Development Configuration
+# Used by docker-compose.dev.yml
+
+server:
+  port: 8080
+  address: "0.0.0.0"
+  readTimeout: 30s
+  writeTimeout: 30s
+  idleTimeout: 60s
+
+ingestion:
+  maxBatchSize: 100
+  flushInterval: 2s
+  maxMemoryMB: 100
+  bufferSize: 5000
+  maxRequestSize: 10485760
+  queueType: memory
+
+dedup:
+  engine: "drain3"
+  cacheSize: 5000
+  contextLines: 5
+  similarityThreshold: 0.4
+  patternTTL: 1h
+  fingerprintTTL: 30m
+
+profiles:
+  autoDetect: true
+  localPath: "/etc/logsieve/profiles"
+  defaultProfile: "generic"
+  trustMode: "offline"
+
+outputs:
+  # Primary output: Loki for log storage
+  - name: "loki"
+    type: "loki"
+    url: "http://loki:3100"
+    batchSize: 50
+    timeout: 10s
+    retries: 3
+    initialBackoff: 250ms
+    maxBackoff: 5s
+    maxFailures: 5
+    cooldown: 30s
+    config:
+      structuredMetadata: true
+
+  # Secondary output: stdout for debugging
+  - name: "stdout"
+    type: "stdout"
+    batchSize: 10
+    timeout: 5s
+    retries: 1
+
+metrics:
+  enabled: true
+  port: 9090
+  path: "/metrics"
+
+logging:
+  level: "debug"
+  format: "console"
+  output: "stdout"
+  structured: false

@@ -1,0 +1,15 @@
+# Grafana dashboard provisioning for LogSieve development environment
+
+apiVersion: 1
+
+providers:
+  - name: 'LogSieve'
+    orgId: 1
+    folder: 'LogSieve'
+    folderUid: 'logsieve'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

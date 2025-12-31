@@ -75,7 +75,7 @@ func (r *Router) createAdapter(cfg config.OutputConfig) (Adapter, error) {
 	case "elasticsearch":
 		return NewElasticsearchAdapter(cfg, r.logger)
 	case "s3":
-		return NewS3Adapter(cfg, r.logger)
+		return NewS3Adapter(cfg, r.metrics, r.logger)
 	default:
 		return nil, fmt.Errorf("unsupported output type: %s", cfg.Type)
 	}
