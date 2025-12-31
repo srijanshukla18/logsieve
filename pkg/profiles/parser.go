@@ -17,12 +17,13 @@ type Profile struct {
 }
 
 type ProfileMetadata struct {
-	Name        string   `yaml:"name"`
-	Version     string   `yaml:"version"`
-	Author      string   `yaml:"author,omitempty"`
-	Description string   `yaml:"description,omitempty"`
-	Tags        []string `yaml:"tags,omitempty"`
-	Images      []string `yaml:"images,omitempty"`
+    Name        string   `yaml:"name"`
+    Version     string   `yaml:"version"`
+    Author      string   `yaml:"author,omitempty"`
+    Description string   `yaml:"description,omitempty"`
+    Tags        []string `yaml:"tags,omitempty"`
+    Images      []string `yaml:"images,omitempty"`
+    Signature   string   `yaml:"signature,omitempty"`
 }
 
 type ProfileSpec struct {

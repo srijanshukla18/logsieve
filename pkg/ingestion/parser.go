@@ -73,33 +73,54 @@ func (p *Parser) parseTimestamp(timestamp, timeField string) (time.Time, error) 
 }
 
 func (p *Parser) tryParseTime(timeStr string) (time.Time, error) {
-	formats := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05.999999999Z07:00",
-		"2006-01-02T15:04:05.999999Z07:00",
-		"2006-01-02T15:04:05.999Z07:00",
-		"2006-01-02T15:04:05Z07:00",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05.999999",
-		"2006-01-02 15:04:05.999",
-		"2006-01-02 15:04:05",
-	}
+    formats := []string{
+        time.RFC3339Nano,
+        time.RFC3339,
+        "2006-01-02T15:04:05.999999999Z07:00",
+        "2006-01-02T15:04:05.999999Z07:00",
+        "2006-01-02T15:04:05.999Z07:00",
+        "2006-01-02T15:04:05Z07:00",
+        "2006-01-02 15:04:05.999999999",
+        "2006-01-02 15:04:05.999999",
+        "2006-01-02 15:04:05.999",
+        "2006-01-02 15:04:05",
+    }
 
-	if unixTime, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
-		if unixTime > 1e12 {
-			return time.Unix(0, unixTime*int64(time.Nanosecond)), nil
-		} else if unixTime > 1e9 {
-			return time.Unix(0, unixTime*int64(time.Microsecond)), nil
-		}
-		return time.Unix(unixTime, 0), nil
-	}
+    // Handle pure integer UNIX timestamps by digit length
+    if isAllDigits(timeStr) {
+        // Determine units by length
+        // 10: seconds, 13: milliseconds, 16: microseconds, 19: nanoseconds
+        switch len(timeStr) {
+        case 19:
+            if v, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
+                return time.Unix(0, v), nil
+            }
+        case 16:
+            if v, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
+                return time.Unix(0, v*1e3), nil
+            }
+        case 13:
+            if v, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
+                return time.Unix(0, v*1e6), nil
+            }
+        case 10:
+            if v, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
+                return time.Unix(v, 0), nil
+            }
+        default:
+            // Fallback: attempt parse as seconds
+            if v, err := strconv.ParseInt(timeStr, 10, 64); err == nil {
+                return time.Unix(v, 0), nil
+            }
+        }
+    }
 
-	if unixTime, err := strconv.ParseFloat(timeStr, 64); err == nil {
-		sec := int64(unixTime)
-		nsec := int64((unixTime - float64(sec)) * 1e9)
-		return time.Unix(sec, nsec), nil
-	}
+    // Floating-point UNIX seconds with fractional part
+    if unixTime, err := strconv.ParseFloat(timeStr, 64); err == nil {
+        sec := int64(unixTime)
+        nsec := int64((unixTime - float64(sec)) * 1e9)
+        return time.Unix(sec, nsec), nil
+    }
 
 	for _, format := range formats {
 		if t, err := time.Parse(format, timeStr); err == nil {
@@ -107,7 +128,16 @@ func (p *Parser) tryParseTime(timeStr string) (time.Time, error) {
 		}
 	}
 
-	return time.Time{}, fmt.Errorf("unable to parse timestamp: %s", timeStr)
+    return time.Time{}, fmt.Errorf("unable to parse timestamp: %s", timeStr)
+}
+
+func isAllDigits(s string) bool {
+    for i := 0; i < len(s); i++ {
+        if s[i] < '0' || s[i] > '9' {
+            return false
+        }
+    }
+    return len(s) > 0
 }
 
 func (p *Parser) extractMetadata(entry *LogEntry) {

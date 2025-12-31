@@ -1,8 +1,9 @@
 package dedup
 
 import (
-	"sync"
-	"time"
+    "sync"
+    "time"
+    "strconv"
 
 	"github.com/rs/zerolog"
 
@@ -56,11 +57,11 @@ func (e *Engine) Process(entry *ingestion.LogEntry) (*Result, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	result := &Result{
-		Entry:       entry,
-		IsDuplicate: false,
-		ShouldOutput: true,
-	}
+    result := &Result{
+        Entry:       entry,
+        IsDuplicate: false,
+        ShouldOutput: true,
+    }
 
 	fingerprint := e.fingerprints.GetFingerprint(entry.Message)
 	result.Fingerprint = fingerprint
@@ -80,28 +81,40 @@ func (e *Engine) Process(entry *ingestion.LogEntry) (*Result, error) {
 		return result, nil
 	}
 
-	templateID, isNew := e.drain.Process(entry.Message)
-	result.TemplateID = templateID
+    addRes := e.drain.AddLogMessage(entry.Message)
+    templateID := strconv.Itoa(addRes.ClusterID)
+    result.TemplateID = templateID
 
-	if !isNew {
-		profile := e.getProfile(entry)
-		e.metrics.DedupCacheHitsTotal.WithLabelValues(profile, "template").Inc()
-		
-		if e.shouldSkipBasedOnTemplate(templateID) {
-			result.IsDuplicate = true
-			result.ShouldOutput = false
-		}
-	}
+    changeType := addRes.ChangeType
+    profile := e.getProfile(entry)
+    if changeType == "cluster_created" {
+        // new pattern
+        e.metrics.DedupTemplateChangesTotal.WithLabelValues(profile, "cluster_created").Inc()
+    } else if changeType == "cluster_template_changed" {
+        e.metrics.DedupTemplateChangesTotal.WithLabelValues(profile, "cluster_template_changed").Inc()
+    } else if changeType == "cluster_size_changed" {
+        e.metrics.DedupTemplateChangesTotal.WithLabelValues(profile, "cluster_size_changed").Inc()
+    }
+
+    if changeType != "cluster_created" {
+        e.metrics.DedupCacheHitsTotal.WithLabelValues(profile, "template").Inc()
+        if e.shouldSkipBasedOnTemplate(templateID) {
+            result.IsDuplicate = true
+            result.ShouldOutput = false
+        }
+    }
 
 	e.fingerprints.Add(fingerprint)
 
-	if e.shouldPreserveContext(entry) {
-		contextEntries := e.context.GetContext(entry)
-		result.Context = contextEntries
-		result.ShouldOutput = true
-	}
+    if e.shouldPreserveContext(entry) {
+        // Collect context (last N before + trigger) and include inline
+        contextEntries := e.context.GetContext(entry)
+        result.Context = contextEntries
+        result.ShouldOutput = true
+    }
 
-	e.context.Add(entry)
+    // Add the current entry to the context window after extracting context
+    e.context.Add(entry)
 
 	e.updateMetrics(entry, result)
 
@@ -141,13 +154,9 @@ func (e *Engine) getProfile(entry *ingestion.LogEntry) string {
 }
 
 func (e *Engine) updateMetrics(entry *ingestion.LogEntry, result *Result) {
-	profile := e.getProfile(entry)
-	
-	if result.IsDuplicate {
-		e.metrics.DedupRatio.WithLabelValues(profile).Set(0.9) // Simplified for now
-	}
-	
-	e.metrics.DedupPatternsTotal.WithLabelValues(profile).Set(float64(e.drain.GetPatternCount()))
+    profile := e.getProfile(entry)
+    // Dedup ratio is computed accurately in processor per batch
+    e.metrics.DedupPatternsTotal.WithLabelValues(profile).Set(float64(e.drain.GetPatternCount()))
 }
 
 func (e *Engine) GetStats() Stats {
@@ -169,6 +178,15 @@ func (e *Engine) Reset() {
 	e.drain.Reset()
 	e.fingerprints.Clear()
 	e.context.Clear()
+}
+
+// Close releases resources owned by the engine
+func (e *Engine) Close() {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    if e.fingerprints != nil {
+        e.fingerprints.Stop()
+    }
 }
 
 type Stats struct {

@@ -148,43 +148,43 @@ func (d *Drain3) AddLogMessage(logMessage string) *AddLogResult {
 
 	cluster := d.treeSearch(tokens)
 	
-	if cluster != nil {
-		// Update existing cluster
-		oldTemplate := strings.Join(cluster.LogTemplate, " ")
-		cluster.Size++
-		cluster.Updated = time.Now()
-		
-		// Update template if needed (generalize with wildcards)
-		d.updateTemplate(cluster, tokens)
-		newTemplate := strings.Join(cluster.LogTemplate, " ")
-		
-		changeType := "none"
-		if oldTemplate != newTemplate {
-			changeType = "cluster_template_changed"
-		} else {
-			changeType = "cluster_size_changed"
-		}
-		
-		return &AddLogResult{
-			ChangeType:     changeType,
-			ClusterID:      cluster.ClusterID,
-			ClusterSize:    cluster.Size,
-			ClusterCount:   len(d.clusters),
-			TemplateMined:  newTemplate,
-		}
-	}
+    if cluster != nil {
+        // Update existing cluster
+        oldTemplate := strings.Join(cluster.LogTemplate, " ")
+        cluster.Size++
+        cluster.Updated = time.Now()
+        
+        // Update template if needed (generalize with wildcards)
+        d.updateTemplate(cluster, tokens)
+        newTemplate := strings.Join(cluster.LogTemplate, " ")
+        
+        changeType := "none"
+        if oldTemplate != newTemplate {
+            changeType = "cluster_template_changed"
+        } else {
+            changeType = "cluster_size_changed"
+        }
+        
+        return &AddLogResult{
+            ChangeType:     changeType,
+            ClusterID:      cluster.ClusterID,
+            ClusterSize:    cluster.Size,
+            ClusterCount:   len(d.clusters),
+            TemplateMined:  newTemplate,
+        }
+    }
 
 	// Create new cluster
 	newCluster := d.createCluster(tokens)
 	d.addClusterToTree(newCluster, tokens)
 	
-	return &AddLogResult{
-		ChangeType:     "cluster_created",
-		ClusterID:      newCluster.ClusterID,
-		ClusterSize:    newCluster.Size,
-		ClusterCount:   len(d.clusters),
-		TemplateMined:  strings.Join(newCluster.LogTemplate, " "),
-	}
+    return &AddLogResult{
+        ChangeType:     "cluster_created",
+        ClusterID:      newCluster.ClusterID,
+        ClusterSize:    newCluster.Size,
+        ClusterCount:   len(d.clusters),
+        TemplateMined:  strings.Join(newCluster.LogTemplate, " "),
+    }
 }
 
 // Match performs inference mode matching (official Drain3 API)
@@ -411,16 +411,80 @@ func (d *Drain3) addClusterToTree(cluster *LogCluster, tokens []string) {
 }
 
 func (d *Drain3) updateTemplate(cluster *LogCluster, tokens []string) {
-	if len(cluster.LogTemplate) != len(tokens) {
-		return
-	}
-	
-	// Update template by generalizing differences with wildcards
-	for i := 0; i < len(cluster.LogTemplate); i++ {
-		if cluster.LogTemplate[i] != tokens[i] && cluster.LogTemplate[i] != "<*>" {
-			cluster.LogTemplate[i] = "<*>"
-		}
-	}
+    if len(cluster.LogTemplate) != len(tokens) {
+        return
+    }
+    
+    // Update template by generalizing differences with wildcards
+    changed := false
+    for i := 0; i < len(cluster.LogTemplate); i++ {
+        if cluster.LogTemplate[i] != tokens[i] && cluster.LogTemplate[i] != "<*>" {
+            cluster.LogTemplate[i] = "<*>"
+            changed = true
+        }
+    }
+
+    // If the template changed to include wildcards, reindex this cluster under a wildcard path
+    if changed {
+        d.addWildcardPathForCluster(cluster)
+    }
+}
+
+// addWildcardPathForCluster ensures the cluster is reachable via a path that respects
+// wildcard positions in its template (up to max node depth). This does not remove
+// the cluster from previous leaves to avoid expensive rewrites.
+func (d *Drain3) addWildcardPathForCluster(cluster *LogCluster) {
+    // Navigate to the appropriate leaf node using wildcard tokens where present
+    currentNode := d.treeRoot
+    currentDepth := 0
+    template := cluster.LogTemplate
+
+    // First level: group by log length
+    lengthKey := strconv.Itoa(len(template))
+    if currentNode.Children[lengthKey] == nil {
+        currentNode.Children[lengthKey] = &Node{
+            Children: make(map[string]*Node),
+            Clusters: []*LogCluster{},
+            Depth:    1,
+        }
+    }
+    currentNode = currentNode.Children[lengthKey]
+    currentDepth++
+
+    for currentDepth < d.config.MaxNodeDepth && currentDepth-1 < len(template) {
+        idx := currentDepth - 1
+        key := template[idx]
+        if key != "<*>" {
+            // Keep specific path as well
+            if currentNode.Children[key] == nil {
+                currentNode.Children[key] = &Node{Children: make(map[string]*Node), Clusters: []*LogCluster{}, Depth: currentDepth + 1}
+            }
+            // Also create a wildcard branch for this depth to allow generalized matching
+            if currentNode.Children["<*>"] == nil {
+                currentNode.Children["<*>"] = &Node{Children: make(map[string]*Node), Clusters: []*LogCluster{}, Depth: currentDepth + 1}
+            }
+            // Prefer wildcard branch for generalized path
+            currentNode = currentNode.Children["<*>"]
+        } else {
+            if currentNode.Children["<*>"] == nil {
+                currentNode.Children["<*>"] = &Node{Children: make(map[string]*Node), Clusters: []*LogCluster{}, Depth: currentDepth + 1}
+            }
+            currentNode = currentNode.Children["<*>"]
+        }
+        currentDepth++
+    }
+
+    // Attach cluster to this leaf if not already present
+    exists := false
+    for _, c := range currentNode.Clusters {
+        if c == cluster {
+            exists = true
+            break
+        }
+    }
+    if !exists {
+        currentNode.Clusters = append(currentNode.Clusters, cluster)
+    }
 }
 
 func (d *Drain3) extractParametersFromTokens(template []string, tokens []string) []string {

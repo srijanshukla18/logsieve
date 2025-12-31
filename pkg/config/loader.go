@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -61,7 +62,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ingestion.flushInterval", defaults.Ingestion.FlushInterval)
 	v.SetDefault("ingestion.maxMemoryMB", defaults.Ingestion.MaxMemoryMB)
 	v.SetDefault("ingestion.bufferSize", defaults.Ingestion.BufferSize)
-	v.SetDefault("ingestion.maxRequestSize", defaults.Ingestion.MaxRequestSize)
+    v.SetDefault("ingestion.maxRequestSize", defaults.Ingestion.MaxRequestSize)
+    v.SetDefault("ingestion.queueType", defaults.Ingestion.QueueType)
+    v.SetDefault("ingestion.diskPath", defaults.Ingestion.DiskPath)
+    v.SetDefault("ingestion.maxDiskBytes", defaults.Ingestion.MaxDiskBytes)
 	
 	v.SetDefault("dedup.engine", defaults.Dedup.Engine)
 	v.SetDefault("dedup.cacheSize", defaults.Dedup.CacheSize)
@@ -75,7 +79,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiles.syncInterval", defaults.Profiles.SyncInterval)
 	v.SetDefault("profiles.localPath", defaults.Profiles.LocalPath)
 	v.SetDefault("profiles.cachePath", defaults.Profiles.CachePath)
-	v.SetDefault("profiles.defaultProfile", defaults.Profiles.DefaultProfile)
+    v.SetDefault("profiles.defaultProfile", defaults.Profiles.DefaultProfile)
+    v.SetDefault("profiles.trustMode", defaults.Profiles.TrustMode)
+    v.SetDefault("profiles.publicKeys", defaults.Profiles.PublicKeys)
 	
 	v.SetDefault("metrics.enabled", defaults.Metrics.Enabled)
 	v.SetDefault("metrics.port", defaults.Metrics.Port)
@@ -125,7 +131,7 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("invalid log level: %s", config.Logging.Level)
 	}
 	
-	for i, output := range config.Outputs {
+    for i, output := range config.Outputs {
 		if output.Name == "" {
 			return fmt.Errorf("output %d: name is required", i)
 		}
@@ -138,10 +144,22 @@ func validateConfig(config *Config) error {
 		if output.Timeout == 0 {
 			config.Outputs[i].Timeout = 10 * config.Server.WriteTimeout
 		}
-		if output.Retries <= 0 {
-			config.Outputs[i].Retries = 3
-		}
-	}
+        if output.Retries <= 0 {
+            config.Outputs[i].Retries = 3
+        }
+        if output.InitialBackoff <= 0 {
+            config.Outputs[i].InitialBackoff = 250 * time.Millisecond
+        }
+        if output.MaxBackoff <= 0 {
+            config.Outputs[i].MaxBackoff = 5 * time.Second
+        }
+        if output.MaxFailures <= 0 {
+            config.Outputs[i].MaxFailures = 5
+        }
+        if output.Cooldown <= 0 {
+            config.Outputs[i].Cooldown = 30 * time.Second
+        }
+    }
 	
 	return nil
 }

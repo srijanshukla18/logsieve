@@ -17,10 +17,11 @@ import (
 )
 
 type LokiAdapter struct {
-	config     config.OutputConfig
-	logger     zerolog.Logger
-	httpClient *http.Client
-	pushURL    string
+    config     config.OutputConfig
+    logger     zerolog.Logger
+    httpClient *http.Client
+    pushURL    string
+    useStructuredMetadata bool
 }
 
 // LokiPushRequest represents the official Loki Push API request format
@@ -30,8 +31,8 @@ type LokiPushRequest struct {
 
 // LokiStream represents a log stream in the official Loki format
 type LokiStream struct {
-	Stream map[string]string `json:"stream"`           // Labels as key-value pairs
-	Values [][]interface{}   `json:"values"`           // [timestamp, log_line, structured_metadata?]
+    Stream map[string]string `json:"stream"`           // Labels as key-value pairs
+    Values [][]interface{}   `json:"values"`           // [timestamp, log_line, structured_metadata?]
 }
 
 // LokiEntry represents a single log entry with optional structured metadata
@@ -42,16 +43,25 @@ type LokiEntry struct {
 }
 
 func NewLokiAdapter(config config.OutputConfig, logger zerolog.Logger) (*LokiAdapter, error) {
-	pushURL := strings.TrimSuffix(config.URL, "/") + "/loki/api/v1/push"
+    pushURL := strings.TrimSuffix(config.URL, "/") + "/loki/api/v1/push"
 
-	return &LokiAdapter{
-		config:  config,
-		logger:  logger.With().Str("adapter", "loki").Logger(),
-		pushURL: pushURL,
-		httpClient: &http.Client{
-			Timeout: config.Timeout,
-		},
-	}, nil
+    la := &LokiAdapter{
+        config:  config,
+        logger:  logger.With().Str("adapter", "loki").Logger(),
+        pushURL: pushURL,
+        httpClient: &http.Client{
+            Timeout: config.Timeout,
+        },
+    }
+
+    // Gate structured metadata by config flag to avoid breaking older Loki
+    if config.Config != nil {
+        if v, ok := config.Config["structuredMetadata"].(bool); ok && v {
+            la.useStructuredMetadata = true
+        }
+    }
+
+    return la, nil
 }
 
 func (l *LokiAdapter) Send(entries []*ingestion.LogEntry) error {
@@ -115,23 +125,23 @@ func (l *LokiAdapter) groupByLabels(entries []*ingestion.LogEntry) []LokiStream 
 		streamKey := l.createStreamKey(labels)
 
 		stream, exists := streamMap[streamKey]
-		if !exists {
-			stream = &LokiStream{
-				Stream: labels,
-				Values: [][]string{},
-			}
-			streamMap[streamKey] = stream
-		}
+        if !exists {
+            stream = &LokiStream{
+                Stream: labels,
+                Values: make([][]interface{}, 0),
+            }
+            streamMap[streamKey] = stream
+        }
 
 		timestamp := strconv.FormatInt(entry.Timestamp.UnixNano(), 10)
 		
-		// Create log entry with optional structured metadata
-		logValue := []interface{}{timestamp, entry.Message}
-		
-		// Add structured metadata if present (Loki v3+ feature)
-		if structuredMetadata := l.extractStructuredMetadata(entry); len(structuredMetadata) > 0 {
-			logValue = append(logValue, structuredMetadata)
-		}
+        // Create log entry; optionally add structured metadata (Loki v3+)
+        logValue := []interface{}{timestamp, entry.Message}
+        if l.useStructuredMetadata {
+            if structuredMetadata := l.extractStructuredMetadata(entry); len(structuredMetadata) > 0 {
+                logValue = append(logValue, structuredMetadata)
+            }
+        }
 		
 		stream.Values = append(stream.Values, logValue)
 	}

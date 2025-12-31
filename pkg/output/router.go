@@ -13,11 +13,13 @@ import (
 )
 
 type Router struct {
-	config   []config.OutputConfig
-	logger   zerolog.Logger
-	metrics  *metrics.Registry
-	adapters map[string]Adapter
-	mu       sync.RWMutex
+    config   []config.OutputConfig
+    logger   zerolog.Logger
+    metrics  *metrics.Registry
+    adapters map[string]Adapter
+    cfgByName map[string]config.OutputConfig
+    breakers map[string]*circuitBreaker
+    mu       sync.RWMutex
 }
 
 type Adapter interface {
@@ -27,12 +29,14 @@ type Adapter interface {
 }
 
 func NewRouter(configs []config.OutputConfig, metrics *metrics.Registry, logger zerolog.Logger) (*Router, error) {
-	router := &Router{
-		config:   configs,
-		logger:   logger.With().Str("component", "output").Logger(),
-		metrics:  metrics,
-		adapters: make(map[string]Adapter),
-	}
+    router := &Router{
+        config:   configs,
+        logger:   logger.With().Str("component", "output").Logger(),
+        metrics:  metrics,
+        adapters: make(map[string]Adapter),
+        cfgByName: make(map[string]config.OutputConfig),
+        breakers: make(map[string]*circuitBreaker),
+    }
 
 	if err := router.initializeAdapters(); err != nil {
 		return nil, fmt.Errorf("failed to initialize adapters: %w", err)
@@ -42,16 +46,18 @@ func NewRouter(configs []config.OutputConfig, metrics *metrics.Registry, logger 
 }
 
 func (r *Router) initializeAdapters() error {
-	for _, cfg := range r.config {
-		adapter, err := r.createAdapter(cfg)
-		if err != nil {
-			r.logger.Error().Err(err).Str("output", cfg.Name).Msg("Failed to create adapter")
-			continue
-		}
+    for _, cfg := range r.config {
+        adapter, err := r.createAdapter(cfg)
+        if err != nil {
+            r.logger.Error().Err(err).Str("output", cfg.Name).Msg("Failed to create adapter")
+            continue
+        }
 
-		r.adapters[cfg.Name] = adapter
-		r.logger.Info().Str("output", cfg.Name).Str("type", cfg.Type).Msg("Initialized output adapter")
-	}
+        r.adapters[cfg.Name] = adapter
+        r.cfgByName[cfg.Name] = cfg
+        r.breakers[cfg.Name] = &circuitBreaker{maxFailures: cfg.MaxFailures, cooldown: cfg.Cooldown}
+        r.logger.Info().Str("output", cfg.Name).Str("type", cfg.Type).Msg("Initialized output adapter")
+    }
 
 	if len(r.adapters) == 0 {
 		return fmt.Errorf("no output adapters initialized")
@@ -145,9 +151,11 @@ func (r *Router) hasAdapter(name string) bool {
 }
 
 func (r *Router) sendToOutput(outputName string, entries []*ingestion.LogEntry) error {
-	r.mu.RLock()
-	adapter, exists := r.adapters[outputName]
-	r.mu.RUnlock()
+    r.mu.RLock()
+    adapter, exists := r.adapters[outputName]
+    cfg := r.cfgByName[outputName]
+    br := r.breakers[outputName]
+    r.mu.RUnlock()
 
 	if !exists {
 		r.metrics.OutputErrorsTotal.WithLabelValues(outputName, "not_found").Inc()
@@ -156,7 +164,35 @@ func (r *Router) sendToOutput(outputName string, entries []*ingestion.LogEntry) 
 
 	start := time.Now()
 	
-	err := adapter.Send(entries)
+    // Circuit breaker check
+    if br != nil && br.isOpen() {
+        r.metrics.OutputErrorsTotal.WithLabelValues(outputName, "circuit_open").Inc()
+        return fmt.Errorf("circuit open for output %s", outputName)
+    }
+
+    // Retry with exponential backoff
+    var err error
+    backoff := cfg.InitialBackoff
+    if backoff <= 0 { backoff = 250 * time.Millisecond }
+    maxBackoff := cfg.MaxBackoff
+    if maxBackoff <= 0 { maxBackoff = 5 * time.Second }
+
+    attempts := cfg.Retries
+    if attempts <= 0 { attempts = 1 }
+
+    for i := 0; i < attempts; i++ {
+        err = adapter.Send(entries)
+        if err == nil {
+            if br != nil { br.onSuccess() }
+            break
+        }
+        if br != nil { br.onFailure() }
+        if i < attempts-1 {
+            time.Sleep(backoff)
+            backoff = backoff * 2
+            if backoff > maxBackoff { backoff = maxBackoff }
+        }
+    }
 	
 	duration := time.Since(start)
 	r.metrics.OutputDuration.WithLabelValues(outputName).Observe(duration.Seconds())
@@ -234,8 +270,36 @@ func (r *Router) Close() error {
 }
 
 type RouterStats struct {
-	AdapterCount int      `json:"adapter_count"`
-	Adapters     []string `json:"adapters"`
+    AdapterCount int      `json:"adapter_count"`
+    Adapters     []string `json:"adapters"`
+}
+
+type circuitBreaker struct {
+    failures    int
+    maxFailures int
+    cooldown    time.Duration
+    openUntil   time.Time
+}
+
+func (cb *circuitBreaker) isOpen() bool {
+    if cb == nil { return false }
+    if time.Now().Before(cb.openUntil) { return true }
+    // cooldown passed; allow attempt
+    return false
+}
+
+func (cb *circuitBreaker) onFailure() {
+    if cb == nil { return }
+    cb.failures++
+    if cb.failures >= cb.maxFailures && cb.maxFailures > 0 {
+        cb.openUntil = time.Now().Add(cb.cooldown)
+        cb.failures = 0
+    }
+}
+
+func (cb *circuitBreaker) onSuccess() {
+    if cb == nil { return }
+    cb.failures = 0
 }
 
 func (r *Router) Stats() RouterStats {

@@ -1,30 +1,53 @@
 package profiles
 
 import (
-	"fmt"
-	"sync"
+    "fmt"
+    "sync"
+    "crypto/ed25519"
+    "encoding/base64"
+    "encoding/hex"
+    "path/filepath"
+    "os"
+    "strings"
 
-	"github.com/rs/zerolog"
+    "github.com/rs/zerolog"
 
 	"github.com/logsieve/logsieve/pkg/config"
-	"github.com/logsieve/logsieve/pkg/ingestion"
+    "github.com/logsieve/logsieve/pkg/ingestion"
+    "github.com/logsieve/logsieve/pkg/metrics"
 )
 
 type Manager struct {
-	config    config.ProfilesConfig
-	logger    zerolog.Logger
-	profiles  map[string]*Profile
-	detector  *Detector
-	mu        sync.RWMutex
+    config    config.ProfilesConfig
+    logger    zerolog.Logger
+    profiles  map[string]*Profile
+    detector  *Detector
+    metrics   *metrics.Registry
+    mu        sync.RWMutex
+    trustMode string
+    pubkeys   [][]byte
 }
 
-func NewManager(cfg config.ProfilesConfig, logger zerolog.Logger) *Manager {
-	return &Manager{
-		config:   cfg,
-		logger:   logger.With().Str("component", "profiles").Logger(),
-		profiles: make(map[string]*Profile),
-		detector: NewDetector(logger),
-	}
+func NewManager(cfg config.ProfilesConfig, metrics *metrics.Registry, logger zerolog.Logger) *Manager {
+    m := &Manager{
+        config:   cfg,
+        logger:   logger.With().Str("component", "profiles").Logger(),
+        profiles: make(map[string]*Profile),
+        detector: NewDetector(logger),
+        metrics:  metrics,
+        trustMode: cfg.TrustMode,
+    }
+    for _, pk := range cfg.PublicKeys {
+        // keys may be base64 or hex; try base64 first
+        if b, err := base64.StdEncoding.DecodeString(pk); err == nil {
+            m.pubkeys = append(m.pubkeys, b)
+            continue
+        }
+        if hb, err := hex.DecodeString(pk); err == nil {
+            m.pubkeys = append(m.pubkeys, hb)
+        }
+    }
+    return m
 }
 
 func (m *Manager) LoadProfiles() error {
@@ -100,7 +123,31 @@ func (m *Manager) loadBuiltinProfiles() error {
 }
 
 func (m *Manager) loadLocalProfiles() error {
-	return nil
+    if m.config.LocalPath == "" {
+        return nil
+    }
+    entries, err := os.ReadDir(m.config.LocalPath)
+    if err != nil {
+        return nil
+    }
+    for _, e := range entries {
+        if e.IsDir() { continue }
+        if !strings.HasSuffix(e.Name(), ".yaml") && !strings.HasSuffix(e.Name(), ".yml") { continue }
+        path := filepath.Join(m.config.LocalPath, e.Name())
+        b, err := os.ReadFile(path)
+        if err != nil { continue }
+        prof, err := ParseProfile(b)
+        if err != nil { continue }
+        if err := m.verifyProfile(prof); err != nil {
+            if m.trustMode == "strict" {
+                m.logger.Warn().Str("file", path).Msg("Rejected unsigned/invalid profile in strict mode")
+                continue
+            }
+            m.logger.Warn().Str("file", path).Msg("Profile failed verification; accepting due to relaxed mode")
+        }
+        _ = m.AddProfile(prof)
+    }
+    return nil
 }
 
 func (m *Manager) GetProfile(name string) (*Profile, error) {
@@ -151,24 +198,30 @@ func (m *Manager) processEntry(entry *ingestion.LogEntry, profile *Profile) (*Pr
 		Modified: false,
 	}
 
-	for _, rule := range profile.Spec.Fingerprints {
-		if matched, err := rule.Matches(entry.Message); err != nil {
-			m.logger.Error().Err(err).Str("pattern", rule.Pattern).Msg("Pattern match error")
-			continue
-		} else if matched {
-			result.Actions = append(result.Actions, rule.Action)
-			
-			switch rule.Action {
-			case "drop":
-				result.Drop = true
-				return result, nil
-			case "template":
-				result.Template = true
-			}
-			
-			break
-		}
-	}
+    matched := false
+    for _, rule := range profile.Spec.Fingerprints {
+        if matched, err := rule.Matches(entry.Message); err != nil {
+            m.logger.Error().Err(err).Str("pattern", rule.Pattern).Msg("Pattern match error")
+            continue
+        } else if matched {
+            matched = true
+            result.Actions = append(result.Actions, rule.Action)
+            
+            switch rule.Action {
+            case "drop":
+                result.Drop = true
+                return result, nil
+            case "template":
+                result.Template = true
+            }
+            
+            break
+        }
+    }
+    result.Matched = matched
+    if !matched && m.metrics != nil {
+        m.metrics.ProfileUnknownPatternsTotal.WithLabelValues(profile.Metadata.Name).Inc()
+    }
 
 	for _, rule := range profile.Spec.Sampling {
 		if matched, err := rule.Matches(entry.Message); err != nil {
@@ -189,7 +242,7 @@ func (m *Manager) processEntry(entry *ingestion.LogEntry, profile *Profile) (*Pr
 		}
 	}
 
-	return result, nil
+    return result, nil
 }
 
 func (m *Manager) ListProfiles() []string {
@@ -205,17 +258,24 @@ func (m *Manager) ListProfiles() []string {
 }
 
 func (m *Manager) AddProfile(profile *Profile) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+    m.mu.Lock()
+    defer m.mu.Unlock()
 
-	if err := m.validateProfile(profile); err != nil {
-		return fmt.Errorf("profile validation failed: %w", err)
-	}
+    if err := m.validateProfile(profile); err != nil {
+        return fmt.Errorf("profile validation failed: %w", err)
+    }
 
-	m.profiles[profile.Metadata.Name] = profile
-	m.logger.Info().Str("name", profile.Metadata.Name).Msg("Added profile")
-	
-	return nil
+    if err := m.verifyProfile(profile); err != nil {
+        if m.trustMode == "strict" {
+            return fmt.Errorf("profile signature invalid (strict mode): %w", err)
+        }
+        m.logger.Warn().Str("name", profile.Metadata.Name).Msg("Profile verification failed; accepting due to relaxed/offline mode")
+    }
+
+    m.profiles[profile.Metadata.Name] = profile
+    m.logger.Info().Str("name", profile.Metadata.Name).Msg("Added profile")
+    
+    return nil
 }
 
 func (m *Manager) RemoveProfile(name string) error {
@@ -262,6 +322,73 @@ func (m *Manager) validateProfile(profile *Profile) error {
 	return nil
 }
 
+// verifyProfile validates signature per configured trust mode.
+// It skips verification for built-in profiles (Images contains "*").
+func (m *Manager) verifyProfile(profile *Profile) error {
+    if m.trustMode == "offline" {
+        return nil
+    }
+    // Treat built-ins as trusted
+    if len(profile.Metadata.Images) == 1 && profile.Metadata.Images[0] == "*" {
+        return nil
+    }
+    if len(m.pubkeys) == 0 {
+        if m.trustMode == "strict" {
+            return fmt.Errorf("no public keys configured for strict mode")
+        }
+        return nil
+    }
+    sigB64 := strings.TrimSpace(profile.Metadata.Signature)
+    if sigB64 == "" {
+        return fmt.Errorf("missing signature")
+    }
+    sig, err := base64.StdEncoding.DecodeString(sigB64)
+    if err != nil {
+        return fmt.Errorf("invalid signature encoding: %w", err)
+    }
+    // Build signable bytes from core fields excluding signature
+    signable, err := m.signableBytes(profile)
+    if err != nil {
+        return err
+    }
+    for _, pk := range m.pubkeys {
+        if len(pk) == ed25519.PublicKeySize && ed25519.Verify(pk, signable, sig) {
+            return nil
+        }
+    }
+    return fmt.Errorf("signature verification failed with configured keys")
+}
+
+func (m *Manager) signableBytes(p *Profile) ([]byte, error) {
+    // Keep it simple: concatenate fields with separators in a stable order.
+    // For stronger guarantees we could use a canonical JSON/YAML encoder.
+    var b strings.Builder
+    b.WriteString(p.APIVersion)
+    b.WriteString("\n")
+    b.WriteString(p.Kind)
+    b.WriteString("\n")
+    b.WriteString(p.Metadata.Name)
+    b.WriteString("\n")
+    b.WriteString(p.Metadata.Version)
+    b.WriteString("\n")
+    b.WriteString(strings.Join(p.Metadata.Images, ","))
+    b.WriteString("\n")
+    // Include spec fingerprints and sampling regex to bind behavior
+    for _, r := range p.Spec.Fingerprints {
+        b.WriteString(r.Pattern)
+        b.WriteString("|")
+        b.WriteString(r.Action)
+        b.WriteString("\n")
+    }
+    for _, r := range p.Spec.Sampling {
+        b.WriteString(r.Pattern)
+        b.WriteString("|")
+        b.WriteString(fmt.Sprintf("%f", r.Rate))
+        b.WriteString("\n")
+    }
+    return []byte(b.String()), nil
+}
+
 func (m *Manager) GetStats() ManagerStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -273,14 +400,15 @@ func (m *Manager) GetStats() ManagerStats {
 }
 
 type ProcessedEntry struct {
-	Entry      *ingestion.LogEntry
-	Profile    string
-	Actions    []string
-	Drop       bool
-	Template   bool
-	Sample     bool
-	SampleRate float64
-	Modified   bool
+    Entry      *ingestion.LogEntry
+    Profile    string
+    Actions    []string
+    Drop       bool
+    Template   bool
+    Sample     bool
+    SampleRate float64
+    Modified   bool
+    Matched    bool
 }
 
 type ManagerStats struct {

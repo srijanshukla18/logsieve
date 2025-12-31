@@ -23,7 +23,7 @@ type Processor struct {
 	dedup          *dedup.Engine
 	profiles       *profiles.Manager
 	router         *output.Router
-	buffer         *ingestion.Buffer
+	buffer         ingestion.Bufferer
 	running        bool
 	stopChan       chan struct{}
 	wg             sync.WaitGroup
@@ -48,7 +48,7 @@ func NewProcessor(cfg *config.Config, metrics *metrics.Registry, logger zerolog.
 func (p *Processor) initialize() error {
 	p.dedup = dedup.NewEngine(p.config.Dedup, p.metrics, p.logger)
 	
-	profileManager := profiles.NewManager(p.config.Profiles, p.logger)
+    profileManager := profiles.NewManager(p.config.Profiles, p.metrics, p.logger)
 	if err := profileManager.LoadProfiles(); err != nil {
 		return fmt.Errorf("failed to load profiles: %w", err)
 	}
@@ -60,7 +60,8 @@ func (p *Processor) initialize() error {
 	}
 	p.router = router
 
-	p.buffer = ingestion.NewBuffer(p.config.Ingestion, p.logger)
+    // Select buffer type based on config (memory or disk)
+    p.buffer = ingestion.NewBufferer(p.config.Ingestion, p.metrics, p.logger)
 
 	return nil
 }
@@ -100,9 +101,13 @@ func (p *Processor) Stop() error {
 		p.logger.Error().Err(err).Msg("Error closing buffer")
 	}
 
-	if err := p.router.Close(); err != nil {
-		p.logger.Error().Err(err).Msg("Error closing router")
-	}
+    if err := p.router.Close(); err != nil {
+        p.logger.Error().Err(err).Msg("Error closing router")
+    }
+
+    if p.dedup != nil {
+        p.dedup.Close()
+    }
 
 	return nil
 }
@@ -146,14 +151,31 @@ func (p *Processor) processBatch(batch []*ingestion.LogEntry) error {
 			Msg("Processed batch")
 	}()
 
-	var outputEntries []*ingestion.LogEntry
+    var outputEntries []*ingestion.LogEntry
+    // Track per-profile reduction
+    inputByProfile := make(map[string]int)
+    outputByProfile := make(map[string]int)
+    matchedByProfile := make(map[string]int)
 
-	for _, entry := range batch {
-		processedEntry, shouldOutput := p.processEntry(entry)
-		if shouldOutput {
-			outputEntries = append(outputEntries, processedEntry)
-		}
-	}
+    for _, entry := range batch {
+        profile := "unknown"
+        if entry.Labels != nil {
+            if v, ok := entry.Labels["profile"]; ok {
+                profile = v
+            }
+        }
+        inputByProfile[profile]++
+
+        entries, matched := p.processEntry(entry)
+        if len(entries) > 0 {
+            outputEntries = append(outputEntries, entries...)
+            // Count outputs for the same profile of the trigger entry
+            outputByProfile[profile] += len(entries)
+        }
+        if matched {
+            matchedByProfile[profile]++
+        }
+    }
 
 	if len(outputEntries) > 0 {
 		if err := p.router.Route(outputEntries); err != nil {
@@ -161,55 +183,66 @@ func (p *Processor) processBatch(batch []*ingestion.LogEntry) error {
 		}
 	}
 
-	reductionRatio := 1.0 - (float64(len(outputEntries)) / float64(len(batch)))
-	p.logger.Debug().
-		Int("input", len(batch)).
-		Int("output", len(outputEntries)).
-		Float64("reduction", reductionRatio).
-		Msg("Batch processing completed")
+    reductionRatio := 1.0 - (float64(len(outputEntries)) / float64(len(batch)))
+    p.logger.Debug().
+        Int("input", len(batch)).
+        Int("output", len(outputEntries)).
+        Float64("reduction", reductionRatio).
+        Msg("Batch processing completed")
+
+    // Update per-profile dedup ratios based on this batch
+    for profile, in := range inputByProfile {
+        if in <= 0 {
+            continue
+        }
+        out := outputByProfile[profile]
+        ratio := 1.0 - (float64(out) / float64(in))
+        if ratio < 0 {
+            ratio = 0
+        }
+        p.metrics.DedupRatio.WithLabelValues(profile).Set(ratio)
+        // Approximate coverage as matched/in
+        cov := float64(matchedByProfile[profile]) / float64(in)
+        if cov < 0 { cov = 0 }
+        if cov > 1 { cov = 1 }
+        p.metrics.ProfileCoverage.WithLabelValues(profile).Set(cov)
+    }
 
 	return nil
 }
 
-func (p *Processor) processEntry(entry *ingestion.LogEntry) (*ingestion.LogEntry, bool) {
-	profileName := p.profiles.DetectProfile(entry)
-	
-	processed, err := p.profiles.ProcessWithProfile(entry, profileName)
-	if err != nil {
-		p.logger.Error().Err(err).Str("profile", profileName).Msg("Profile processing error")
-		return entry, true
-	}
+func (p *Processor) processEntry(entry *ingestion.LogEntry) ([]*ingestion.LogEntry, bool) {
+    profileName := p.profiles.DetectProfile(entry)
+    
+    processed, err := p.profiles.ProcessWithProfile(entry, profileName)
+    if err != nil {
+        p.logger.Error().Err(err).Str("profile", profileName).Msg("Profile processing error")
+        return []*ingestion.LogEntry{entry}, false
+    }
 
-	if processed.Drop {
-		return nil, false
-	}
+    if processed.Drop {
+        return nil, processed.Matched
+    }
 
-	dedupResult, err := p.dedup.Process(entry)
-	if err != nil {
-		p.logger.Error().Err(err).Msg("Dedup processing error")
-		return entry, true
-	}
+    dedupResult, err := p.dedup.Process(entry)
+    if err != nil {
+        p.logger.Error().Err(err).Msg("Dedup processing error")
+        return []*ingestion.LogEntry{entry}, processed.Matched
+    }
 
-	if dedupResult.IsDuplicate && !dedupResult.ShouldOutput {
-		return nil, false
-	}
+    if dedupResult.IsDuplicate && !dedupResult.ShouldOutput {
+        return nil, processed.Matched
+    }
 
-	if len(dedupResult.Context) > 0 {
-		contextEntries := make([]*ingestion.LogEntry, len(dedupResult.Context))
-		copy(contextEntries, dedupResult.Context)
-		
-		for _, contextEntry := range contextEntries {
-			if contextEntry != entry {
-				go func(ce *ingestion.LogEntry) {
-					if err := p.router.Route([]*ingestion.LogEntry{ce}); err != nil {
-						p.logger.Error().Err(err).Msg("Failed to route context entry")
-					}
-				}(contextEntry)
-			}
-		}
-	}
-
-	return entry, true
+    // Build ordered output: context entries first, then the trigger/current entry
+    out := make([]*ingestion.LogEntry, 0, 1+len(dedupResult.Context))
+    if len(dedupResult.Context) > 0 {
+        for _, ce := range dedupResult.Context {
+            out = append(out, ce)
+        }
+    }
+    out = append(out, entry)
+    return out, processed.Matched
 }
 
 func (p *Processor) AddEntry(entry *ingestion.LogEntry) error {

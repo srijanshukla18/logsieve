@@ -37,61 +37,40 @@ func (cw *ContextWindow) Add(entry *ingestion.LogEntry) {
 }
 
 func (cw *ContextWindow) GetContext(triggerEntry *ingestion.LogEntry) []*ingestion.LogEntry {
-	cw.mu.RLock()
-	defer cw.mu.RUnlock()
+    cw.mu.RLock()
+    defer cw.mu.RUnlock()
 
-	if len(cw.buffer) == 0 {
-		return []*ingestion.LogEntry{triggerEntry}
-	}
+    // Take last N entries as "before" context and append the trigger.
+    if cw.contextLines <= 0 {
+        return []*ingestion.LogEntry{triggerEntry}
+    }
 
-	triggerIndex := -1
-	for i := len(cw.buffer) - 1; i >= 0; i-- {
-		if cw.buffer[i] == triggerEntry {
-			triggerIndex = i
-			break
-		}
-	}
+    beforeCount := cw.contextLines
+    if beforeCount > len(cw.buffer) {
+        beforeCount = len(cw.buffer)
+    }
 
-	if triggerIndex == -1 {
-		return []*ingestion.LogEntry{triggerEntry}
-	}
+    startIndex := len(cw.buffer) - beforeCount
+    context := make([]*ingestion.LogEntry, 0, beforeCount+1)
 
-	startIndex := triggerIndex - cw.contextLines
-	if startIndex < 0 {
-		startIndex = 0
-	}
+    for i := startIndex; i < len(cw.buffer); i++ {
+        entryCopy := *cw.buffer[i]
+        if entryCopy.Labels == nil {
+            entryCopy.Labels = make(map[string]string)
+        }
+        entryCopy.Labels["context_position"] = "before"
+        context = append(context, &entryCopy)
+    }
 
-	endIndex := triggerIndex + cw.contextLines + 1
-	if endIndex > len(cw.buffer) {
-		endIndex = len(cw.buffer)
-	}
+    // Append the trigger entry as the last item in context set
+    triggerCopy := *triggerEntry
+    if triggerCopy.Labels == nil {
+        triggerCopy.Labels = make(map[string]string)
+    }
+    triggerCopy.Labels["context_trigger"] = "true"
+    context = append(context, &triggerCopy)
 
-	context := make([]*ingestion.LogEntry, 0, endIndex-startIndex)
-	
-	for i := startIndex; i < endIndex; i++ {
-		entryCopy := *cw.buffer[i]
-		
-		if i == triggerIndex {
-			if entryCopy.Labels == nil {
-				entryCopy.Labels = make(map[string]string)
-			}
-			entryCopy.Labels["context_trigger"] = "true"
-		} else if i < triggerIndex {
-			if entryCopy.Labels == nil {
-				entryCopy.Labels = make(map[string]string)
-			}
-			entryCopy.Labels["context_position"] = "before"
-		} else {
-			if entryCopy.Labels == nil {
-				entryCopy.Labels = make(map[string]string)
-			}
-			entryCopy.Labels["context_position"] = "after"
-		}
-		
-		context = append(context, &entryCopy)
-	}
-
-	return context
+    return context
 }
 
 func (cw *ContextWindow) Size() int {

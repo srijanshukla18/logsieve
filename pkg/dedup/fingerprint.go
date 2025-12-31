@@ -45,20 +45,21 @@ func (fc *FingerprintCache) Add(fingerprint string) {
 }
 
 func (fc *FingerprintCache) Exists(fingerprint string) bool {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-	
-	expiryTime, exists := fc.fingerprints[fingerprint]
-	if !exists {
-		return false
-	}
-	
-	if time.Now().After(expiryTime) {
-		delete(fc.fingerprints, fingerprint)
-		return false
-	}
-	
-	return true
+    // Use write lock because we may delete expired entries
+    fc.mu.Lock()
+    defer fc.mu.Unlock()
+
+    expiryTime, exists := fc.fingerprints[fingerprint]
+    if !exists {
+        return false
+    }
+
+    if time.Now().After(expiryTime) {
+        delete(fc.fingerprints, fingerprint)
+        return false
+    }
+
+    return true
 }
 
 func (fc *FingerprintCache) Size() int {
