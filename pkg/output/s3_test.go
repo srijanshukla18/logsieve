@@ -8,6 +8,7 @@ import (
 
 	"github.com/logsieve/logsieve/pkg/config"
 	"github.com/logsieve/logsieve/pkg/ingestion"
+	"github.com/logsieve/logsieve/pkg/metrics"
 )
 
 func TestNewS3Adapter(t *testing.T) {
@@ -18,8 +19,9 @@ func TestNewS3Adapter(t *testing.T) {
 		Timeout: 10 * time.Second,
 	}
 	logger := zerolog.Nop()
+	metricsRegistry := metrics.NewRegistry()
 
-	adapter, err := NewS3Adapter(cfg, logger)
+	adapter, err := NewS3Adapter(cfg, metricsRegistry, logger)
 	if err != nil {
 		t.Fatalf("NewS3Adapter failed: %v", err)
 	}
@@ -39,8 +41,9 @@ func TestS3Adapter_Send(t *testing.T) {
 		URL:  "s3://bucket/logs",
 	}
 	logger := zerolog.Nop()
+	metricsRegistry := metrics.NewRegistry()
 
-	adapter, _ := NewS3Adapter(cfg, logger)
+	adapter, _ := NewS3Adapter(cfg, metricsRegistry, logger)
 
 	entries := []*ingestion.LogEntry{
 		{
@@ -64,8 +67,9 @@ func TestS3Adapter_Send_Empty(t *testing.T) {
 		URL:  "s3://bucket/logs",
 	}
 	logger := zerolog.Nop()
+	metricsRegistry := metrics.NewRegistry()
 
-	adapter, _ := NewS3Adapter(cfg, logger)
+	adapter, _ := NewS3Adapter(cfg, metricsRegistry, logger)
 
 	err := adapter.Send([]*ingestion.LogEntry{})
 	if err != nil {
@@ -80,8 +84,9 @@ func TestS3Adapter_Send_Multiple(t *testing.T) {
 		URL:  "s3://bucket/logs",
 	}
 	logger := zerolog.Nop()
+	metricsRegistry := metrics.NewRegistry()
 
-	adapter, _ := NewS3Adapter(cfg, logger)
+	adapter, _ := NewS3Adapter(cfg, metricsRegistry, logger)
 
 	entries := []*ingestion.LogEntry{
 		{Message: "log 1", Timestamp: time.Now()},
@@ -101,8 +106,9 @@ func TestS3Adapter_Name(t *testing.T) {
 		Type: "s3",
 	}
 	logger := zerolog.Nop()
+	metricsRegistry := metrics.NewRegistry()
 
-	adapter, _ := NewS3Adapter(cfg, logger)
+	adapter, _ := NewS3Adapter(cfg, metricsRegistry, logger)
 
 	if adapter.Name() != "custom-s3-output" {
 		t.Errorf("expected name custom-s3-output, got %s", adapter.Name())
@@ -115,8 +121,9 @@ func TestS3Adapter_Close(t *testing.T) {
 		Type: "s3",
 	}
 	logger := zerolog.Nop()
+	metricsRegistry := metrics.NewRegistry()
 
-	adapter, _ := NewS3Adapter(cfg, logger)
+	adapter, _ := NewS3Adapter(cfg, metricsRegistry, logger)
 
 	err := adapter.Close()
 	if err != nil {

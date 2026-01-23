@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "logsieve.fullname" . }}-config
+  labels:
+    {{- include "logsieve.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    server:
+      port: {{ .Values.config.server.port }}
+      address: {{ .Values.config.server.address | quote }}
+      readTimeout: {{ .Values.config.server.readTimeout }}
+      writeTimeout: {{ .Values.config.server.writeTimeout }}
+      idleTimeout: {{ .Values.config.server.idleTimeout }}
+
+    ingestion:
+      maxBatchSize: {{ .Values.config.ingestion.maxBatchSize }}
+      flushInterval: {{ .Values.config.ingestion.flushInterval }}
+      maxMemoryMB: {{ .Values.config.ingestion.maxMemoryMB }}
+      bufferSize: {{ .Values.config.ingestion.bufferSize }}
+      maxRequestSize: {{ .Values.config.ingestion.maxRequestSize }}
+      queueType: {{ .Values.config.ingestion.queueType | quote }}
+
+    dedup:
+      engine: {{ .Values.config.dedup.engine | quote }}
+      cacheSize: {{ .Values.config.dedup.cacheSize }}
+      contextLines: {{ .Values.config.dedup.contextLines }}
+      similarityThreshold: {{ .Values.config.dedup.similarityThreshold }}
+      patternTTL: {{ .Values.config.dedup.patternTTL }}
+      fingerprintTTL: {{ .Values.config.dedup.fingerprintTTL }}
+
+    profiles:
+      autoDetect: {{ .Values.config.profiles.autoDetect }}
+      localPath: {{ .Values.config.profiles.localPath | quote }}
+      cachePath: {{ .Values.config.profiles.cachePath | quote }}
+      defaultProfile: {{ .Values.config.profiles.defaultProfile | quote }}
+      trustMode: {{ .Values.config.profiles.trustMode | quote }}
+
+    outputs:
+      {{- toYaml .Values.config.outputs | nindent 6 }}
+
+    metrics:
+      enabled: {{ .Values.config.metrics.enabled }}
+      port: {{ .Values.config.metrics.port }}
+      path: {{ .Values.config.metrics.path | quote }}
+
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+      output: {{ .Values.config.logging.output | quote }}
+      structured: {{ .Values.config.logging.structured }}
+---
+{{- if .Values.profiles }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "logsieve.fullname" . }}-profiles
+  labels:
+    {{- include "logsieve.labels" . | nindent 4 }}
+data:
+  {{- range $name, $content := .Values.profiles }}
+  {{ $name }}.yaml: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

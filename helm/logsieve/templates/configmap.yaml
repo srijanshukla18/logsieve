@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "logsieve.fullname" . }}
+  labels:
+    {{- include "logsieve.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}
+---
+{{- if .Values.profiles.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "logsieve.fullname" . }}-profiles
+  labels:
+    {{- include "logsieve.labels" . | nindent 4 }}
+data:
+  {{- if .Values.profiles.configMap.data }}
+  {{- toYaml .Values.profiles.configMap.data | nindent 2 }}
+  {{- else }}
+  generic.yaml: |
+    apiVersion: hub.logsieve.io/v1
+    kind: LogProfile
+    metadata:
+      name: generic
+      version: "1.0.0"
+      description: "Generic fallback profile"
+      tags: ["generic", "fallback"]
+    spec:
+      fingerprints:
+        - pattern: ".*"
+          action: "template"
+  {{- end }}
+{{- end }}
