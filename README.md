@@ -1,71 +1,62 @@
 # LogSieve
 
-A high-performance log deduplication sidecar that reduces container log volumes by ~90% using the Drain3 algorithm and community-powered profiles.
+**Slash your Datadog/Splunk bill by 90% before logs ever leave your cluster.**
 
-## Why
+LogSieve is a high-performance, self-hosted log deduplication sidecar. It sits between your log collector (like Fluent Bit) and your expensive storage backend (Datadog, Splunk, Loki, Elasticsearch). Using the production-grade **Drain3 algorithm**, it intelligently groups, templates, and drops redundant logs (like health checks, repetitive stack traces, and heartbeats) while preserving the exact context you need for debugging.
 
-**Your logging bill is 90% noise.** Health checks, heartbeats, duplicate stack traces - they drown the signal while exploding storage costs. LogSieve sits between your log collector and storage backend, intelligently deduplicating logs using shared profiles so you don't have to write (and maintain) regex filters for every application in your stack.
+## Why LogSieve?
+
+If you are paying $10k/month for log ingestion, $9k of that is likely noise. You don't need to index the exact same `GET /health` log 10,000 times a second.
+
+- **Zero Data Lock-in:** Run LogSieve purely as a sidecar or daemonset in your own AWS/GCP cluster. Your logs never touch our servers.
+- **No Regex Maintenance:** Stop writing brittle regex rules. LogSieve's Drain3 engine automatically clusters and templates logs on the fly.
+- **Context Preservation:** When an `ERROR` or `FATAL` log occurs, LogSieve automatically preserves the previous N lines of context, ensuring you never lose the exact request trace that caused the crash.
 
 ---
 
 ## How It Works
 
-```
-┌──────────┐     ┌────────────┐     ┌──────────┐     ┌─────────────────┐
-│ Your App │────>│ Fluent Bit │────>│ LogSieve │────>│ Loki/ES/S3/etc  │
-└──────────┘     └────────────┘     └──────────┘     └─────────────────┘
+```text
+┌──────────┐     ┌────────────┐     ┌──────────┐     ┌─────────────────────┐
+│ Your App │────>│ Fluent Bit │────>│ LogSieve │────>│ Datadog/Splunk/Loki │
+└──────────┘     └────────────┘     └──────────┘     └─────────────────────┘
                                           │
                                     ┌─────┴─────┐
                                     │ Profiles  │
-                                    │ (builtin  │
-                                    │ + custom) │
+                                    │ (Nginx,   │
+                                    │ Postgres, │
+                                    │ Custom)   │
                                     └───────────┘
 ```
 
-1. **Fluent Bit** (or any log collector) sends logs to LogSieve's HTTP endpoint
-2. **LogSieve** applies profile-based rules and Drain3 templating to deduplicate
-3. **Only unique/important logs** get forwarded to your storage backend
+1. **Collect:** Fluent Bit sends raw JSON logs to LogSieve's high-throughput HTTP ingestion endpoint.
+2. **Deduplicate:** LogSieve applies profile-based rules. Exact duplicates are dropped via SHA256 caching. Similar logs are clustered into templates via Drain3.
+3. **Route:** Only unique, critical, or sampled logs are forwarded to your final storage destination.
 
 ---
 
 ## Features
 
-### Deduplication Engine
-- **Drain3 Algorithm**: Production-grade implementation with prefix tree clustering, template generalization, and configurable similarity thresholds
-- **Fingerprint Cache**: SHA256-based exact duplicate detection with TTL
-- **Context Windows**: Preserve N lines around errors/critical events
+- **Blazing Fast:** Written in Go. Handles 10,000+ logs/second per instance with sub-10ms p99 latency.
+- **Built-in Profiles:** Ships with pre-configured rules for Nginx, PostgreSQL, and Java Spring.
+- **Observability Native:** Exposes Prometheus metrics (`logsieve_dedup_ratio`) so you can track exactly how much money you are saving in real-time.
+- **Graceful Output Adapters:** Native integrations for Loki, Elasticsearch, and `stdout`.
 
-### Profile System
-- **Auto-detection**: Matches containers to profiles by image name or log patterns
-- **Builtin Profiles**: nginx, postgres, java-spring included out of the box
-- **YAML Configuration**: Define fingerprint rules, sampling rates, transforms, and routing
-- **Signature Verification**: Ed25519 signing support for profile integrity (strict/relaxed modes)
+## Quick Start (Docker Compose)
 
-### Output Adapters
-- **Loki**: Full v3+ support with structured metadata and cardinality-aware label handling
-- **Elasticsearch**: ECS-compliant document structure
-- **S3**: Batched uploads for archival
-- **stdout**: Development and debugging
-
-### Observability
-- **Prometheus Metrics**: `logsieve_dedup_ratio`, `logsieve_ingestion_logs_total`, `logsieve_output_errors_total`, etc.
-- **Circuit Breakers**: Automatic backoff and retry with exponential delays
-- **Health Endpoints**: `/health`, `/ready`, `/stats`
-
----
-
-## Quick Start
-
-### Docker Compose
+Deploy LogSieve locally with Fluent Bit, Loki, and Grafana to see the deduplication in action.
 
 ```yaml
+version: '3.8'
+
 services:
   logsieve:
     image: logsieve/sieve:latest
     ports:
       - "8080:8080"   # HTTP ingestion
-      - "9090:9090"   # Metrics
+      - "9090:9090"   # Prometheus Metrics
     environment:
+      - LOGSIEVE_LICENSE_KEY=your_license_key_here
       - LOGSIEVE_PROFILES_AUTODETECT=true
     volumes:
       - ./config.yaml:/etc/logsieve/config.yaml
@@ -78,21 +69,7 @@ services:
       - logsieve
 ```
 
-### Fluent Bit Configuration
-
-```ini
-[OUTPUT]
-    Name          http
-    Match         *
-    Host          logsieve
-    Port          8080
-    URI           /ingest?profile=auto
-    Format        json
-    Header        X-Source fluent-bit
-```
-
-### Send Test Logs
-
+Send a test batch:
 ```bash
 curl -X POST http://localhost:8080/ingest \
   -H "Content-Type: application/json" \
@@ -104,20 +81,17 @@ curl -X POST http://localhost:8080/ingest \
   }'
 ```
 
----
-
 ## Configuration
+
+LogSieve is configured via a YAML file.
 
 ```yaml
 server:
   port: 8080
-  address: "0.0.0.0"
 
 ingestion:
   maxBatchSize: 1000
   flushInterval: 5s
-  maxMemoryMB: 100
-  queueType: memory  # or "disk" for persistence
 
 dedup:
   engine: "drain3"
@@ -125,144 +99,21 @@ dedup:
   contextLines: 5
   similarityThreshold: 0.4
 
-profiles:
-  autoDetect: true
-  localPath: "/etc/logsieve/profiles"
-  trustMode: relaxed  # strict|relaxed|offline
-
 outputs:
   - name: "loki"
     type: "loki"
     url: "http://loki:3100"
-    batchSize: 100
-    retries: 3
-
-metrics:
-  enabled: true
-  port: 9090
 ```
-
----
-
-## Profiles
-
-Profiles define how logs from specific applications should be processed. Example for nginx:
-
-```yaml
-apiVersion: hub.logsieve.io/v1
-kind: LogProfile
-metadata:
-  name: nginx
-  version: "1.0.0"
-  images:
-    - "nginx:*"
-
-spec:
-  fingerprints:
-    - pattern: '"GET /health'
-      action: "drop"
-    - pattern: '\[error\]'
-      action: "keep"
-    - pattern: '\d+\.\d+\.\d+\.\d+ - - \[.*?\]'
-      action: "template"
-
-  sampling:
-    - pattern: '"GET /health'
-      rate: 0.01  # Keep 1%
-
-  transforms:
-    - field: "message"
-      regex: '(password=)[^&\s]+'
-      replace: '$1***'
-```
-
-### Profile Actions
-- **drop**: Discard the log entirely
-- **keep**: Always forward (bypass deduplication)
-- **template**: Apply Drain3 clustering
-
----
 
 ## Architecture
 
-```
-cmd/
-  logsieve/       # CLI tool (capture, learn, audit, config)
-  server/         # HTTP server entry point
+- `cmd/server/`: The HTTP ingestion pipeline and routing engine.
+- `pkg/dedup/`: The core Drain3 algorithm and context window management.
+- `pkg/profiles/`: Auto-detection and parsing of application-specific rule sets.
+- `pkg/output/`: Delivery adapters for external storage.
 
-pkg/
-  config/         # YAML configuration loading
-  dedup/          # Drain3 + fingerprint + context window
-  ingestion/      # HTTP handler, parser, memory/disk buffer
-  metrics/        # Prometheus registry
-  output/         # Loki, Elasticsearch, S3, stdout adapters
-  processor/      # Orchestrates dedup -> profiles -> routing
-  profiles/       # Profile parsing, detection, verification
+## License & Pricing
 
-profiles/         # Builtin YAML profiles (nginx, postgres, java-spring)
-docker/           # Dockerfile and Dockerfile.distroless
-```
+LogSieve is distributed as a commercial binary/Docker container. To use LogSieve in production, you must purchase a license key and provide it via the `LOGSIEVE_LICENSE_KEY` environment variable. 
 
----
-
-## CLI Commands
-
-```bash
-# Start the server
-logsieve server --config config.yaml
-
-# Generate example config
-logsieve config example -o config.yaml
-
-# Validate config
-logsieve config validate -c config.yaml
-
-# Show version
-logsieve version
-```
-
----
-
-## Metrics
-
-| Metric | Description |
-|--------|-------------|
-| `logsieve_dedup_ratio` | Deduplication ratio (0-1) per profile |
-| `logsieve_ingestion_logs_total` | Total logs ingested by source/profile |
-| `logsieve_output_logs_total` | Logs forwarded to outputs |
-| `logsieve_output_errors_total` | Output delivery failures |
-| `logsieve_dedup_patterns_total` | Active Drain3 clusters |
-
----
-
-## Building from Source
-
-```bash
-# Prerequisites: Go 1.21+
-git clone https://github.com/logsieve/logsieve.git
-cd logsieve
-
-# Build
-make build
-
-# Run tests
-make test
-
-# Build Docker image
-make docker-build
-```
-
----
-
-## Performance Targets
-
-- **Throughput**: 10,000 logs/second per instance
-- **Latency**: <10ms p99
-- **Memory**: <100MB baseline, <500MB under load
-- **Dedup Ratio**: >85% for typical workloads
-
----
-
-## License
-
-[License details to be added]
+[Link to Pricing/Landing Page coming soon]
